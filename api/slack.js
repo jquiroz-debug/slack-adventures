@@ -1,5 +1,27 @@
+export const config = {
+  api: { bodyParser: false },
+};
+
 export default async function handler(req, res) {
-  const body = req.body;
+  // Parse raw body
+  const rawBody = await new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => { data += chunk; });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+
+  // Slack sends block_actions as URL-encoded with a "payload" field
+  let body;
+  if (rawBody.startsWith('payload=')) {
+    body = JSON.parse(decodeURIComponent(rawBody.slice(8)));
+  } else if (rawBody.startsWith('{')) {
+    body = JSON.parse(rawBody);
+  } else {
+    // slash command — URL-encoded key=value pairs
+    const params = new URLSearchParams(rawBody);
+    body = Object.fromEntries(params.entries());
+  }
 
   // ── 1. URL verification ──────────────────────────────────────────────────
   if (body?.type === 'url_verification') {
@@ -14,15 +36,16 @@ export default async function handler(req, res) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify(payload),
     });
-    return r.json();
+    const d = await r.json();
+    if (!d.ok) console.error(`Slack ${method} error:`, d.error, JSON.stringify(d));
+    return d;
   }
 
   // ── 2. App Home opened ───────────────────────────────────────────────────
   if (body?.event?.type === 'app_home_opened') {
-    const userId = body.event.user;
     await slackAPI('views.publish', {
-      user_id: userId,
-      view: buildHomeView('pick'),
+      user_id: body.event.user,
+      view: buildHomeView('All'),
     });
     return res.status(200).send('');
   }
@@ -32,7 +55,7 @@ export default async function handler(req, res) {
     const action = body.actions?.[0];
     const userId = body.user?.id;
 
-    // Adventure card button — open modal with details
+    // Adventure card — open modal
     if (action?.action_id?.startsWith('adv_')) {
       const advId = parseInt(action.action_id.replace('adv_', ''));
       const adv = ADVENTURES.find(a => a.id === advId);
@@ -45,7 +68,7 @@ export default async function handler(req, res) {
       return res.status(200).send('');
     }
 
-    // Hub filter button — re-publish home with filter
+    // Hub filter
     if (action?.action_id?.startsWith('filter_')) {
       const hub = action.action_id.replace('filter_', '').replace(/_/g, ' ');
       await slackAPI('views.publish', {
@@ -58,11 +81,29 @@ export default async function handler(req, res) {
     return res.status(200).send('');
   }
 
-  // ── 4. Slash command ─────────────────────────────────────────────────────
+  // ── 4. Modal submission — adventure completed ────────────────────────────
+  if (body?.type === 'view_submission') {
+    const callbackId = body.view?.callback_id || '';
+    if (callbackId.startsWith('complete_adv_')) {
+      const advId = parseInt(callbackId.replace('complete_adv_', ''));
+      const adv = ADVENTURES.find(a => a.id === advId);
+      const evidence = body.view?.state?.values?.evidence_block?.evidence_input?.value || '';
+
+      // Send confirmation message to user
+      await slackAPI('chat.postMessage', {
+        channel: body.user.id,
+        text: `✅ *${adv?.adv || 'Adventure'}* completed!\n\n📎 Your evidence: ${evidence}\n\nKeep going — open *Adventures* in the sidebar for your next one.`,
+      });
+
+      return res.status(200).json({ response_action: 'clear' });
+    }
+  }
+
+  // ── 5. Slash command ─────────────────────────────────────────────────────
   if (body?.command === '/adventures') {
     return res.status(200).json({
       response_type: 'ephemeral',
-      text: '🗺️ Open the *Adventures* app in your sidebar to start your HubSpot adventure!',
+      text: '🗺️ Open *Adventures* in your sidebar (under Apps) to start your HubSpot adventure!',
     });
   }
 
@@ -72,8 +113,7 @@ export default async function handler(req, res) {
 // ── BUILD HOME VIEW ─────────────────────────────────────────────────────────
 function buildHomeView(activeFilter) {
   const hubs = ['All', 'Get Started', 'Marketing Hub', 'Sales Hub', 'Service Hub', 'AI & Breeze', 'Agentic Platform'];
-  const filter = activeFilter === 'pick' ? 'All' : activeFilter;
-
+  const filter = activeFilter || 'All';
   const filtered = filter === 'All' ? ADVENTURES : ADVENTURES.filter(a => a.hub === filter);
 
   const filterButtons = hubs.map(h => ({
@@ -84,26 +124,13 @@ function buildHomeView(activeFilter) {
   }));
 
   const blocks = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: '🗺️ Slack Adventures — Academy Onboarding', emoji: true },
-    },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: 'Pick the adventures that match what you want to build in HubSpot. Each one has a short Academy video and a concrete task.',
-      },
-    },
+    { type: 'header', text: { type: 'plain_text', text: '🗺️ Slack Adventures — Academy Onboarding', emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: 'Pick the adventures that match what you want to build in HubSpot. Each one has a short Academy video and a concrete task.' } },
     { type: 'divider' },
-    {
-      type: 'actions',
-      elements: filterButtons,
-    },
+    { type: 'actions', elements: filterButtons },
     { type: 'divider' },
   ];
 
-  // Group adventures by route within the filter
   const groups = {};
   filtered.forEach(adv => {
     if (!groups[adv.route]) groups[adv.route] = [];
@@ -111,18 +138,11 @@ function buildHomeView(activeFilter) {
   });
 
   Object.entries(groups).forEach(([route, advs]) => {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*${HUB_EMOJI[advs[0].hub] || '📌'} ${route}*` },
-    });
-
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${HUB_EMOJI[advs[0].hub] || '📌'} ${route}*` } });
     advs.forEach(adv => {
       blocks.push({
         type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*${adv.adv}*\n${adv.desc}${adv.dur ? `  ·  ⏱ ${adv.dur}` : ''}`,
-        },
+        text: { type: 'mrkdwn', text: `*${adv.adv}*\n${adv.desc}${adv.dur ? `  ·  ⏱ ${adv.dur}` : ''}` },
         accessory: {
           type: 'button',
           text: { type: 'plain_text', text: 'Start →', emoji: true },
@@ -131,72 +151,38 @@ function buildHomeView(activeFilter) {
         },
       });
     });
-
     blocks.push({ type: 'divider' });
   });
 
-  blocks.push({
-    type: 'context',
-    elements: [{ type: 'mrkdwn', text: '42 adventures · 9 routes · HubSpot Academy content' }],
-  });
-
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '42 adventures · 9 routes · HubSpot Academy content' }] });
   return { type: 'home', blocks };
 }
 
-// ── BUILD ADVENTURE MODAL ───────────────────────────────────────────────────
+// ── BUILD ADVENTURE MODAL ────────────────────────────────────────────────────
 function buildAdventureModal(adv) {
   const blocks = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*${HUB_EMOJI[adv.hub] || '📌'} ${adv.hub}  ·  ${adv.route}*\n\n${adv.desc}`,
-      },
-    },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${HUB_EMOJI[adv.hub] || '📌'} ${adv.hub}  ·  ${adv.route}*\n\n${adv.desc}` } },
     { type: 'divider' },
   ];
 
   if (adv.vid1) {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*▶ Watch first*${adv.dur ? `  ·  ⏱ ${adv.dur}` : ''}` },
-    });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*▶ Watch first*${adv.dur ? `  ·  ⏱ ${adv.dur}` : ''}` } });
     blocks.push({
       type: 'actions',
       elements: [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: adv.vid2 ? 'Watch video — part 1 ↗' : 'Watch video ↗', emoji: true },
-          url: adv.vid1,
-          action_id: 'watch_vid1',
-        },
-        ...(adv.vid2 ? [{
-          type: 'button',
-          text: { type: 'plain_text', text: 'Watch video — part 2 ↗', emoji: true },
-          url: adv.vid2,
-          action_id: 'watch_vid2',
-        }] : []),
+        { type: 'button', text: { type: 'plain_text', text: adv.vid2 ? 'Watch video — part 1 ↗' : 'Watch video ↗', emoji: true }, url: adv.vid1, action_id: 'watch_vid1' },
+        ...(adv.vid2 ? [{ type: 'button', text: { type: 'plain_text', text: 'Watch video — part 2 ↗', emoji: true }, url: adv.vid2, action_id: 'watch_vid2' }] : []),
       ],
     });
     blocks.push({ type: 'divider' });
   }
 
-  blocks.push({
-    type: 'section',
-    text: { type: 'mrkdwn', text: `*🎯 Your task*\n${adv.task}` },
-  });
-
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🎯 Your task*\n${adv.task}` } });
   blocks.push({ type: 'divider' });
-
   blocks.push({
     type: 'input',
     block_id: 'evidence_block',
-    element: {
-      type: 'plain_text_input',
-      action_id: 'evidence_input',
-      multiline: true,
-      placeholder: { type: 'plain_text', text: 'URL, screenshot description, or a note about what you did…' },
-    },
+    element: { type: 'plain_text_input', action_id: 'evidence_input', multiline: true, placeholder: { type: 'plain_text', text: 'URL, screenshot description, or a note about what you did…' } },
     label: { type: 'plain_text', text: '📎 Share your evidence', emoji: true },
   });
 
@@ -210,17 +196,8 @@ function buildAdventureModal(adv) {
   };
 }
 
-// ── HUB EMOJIS ──────────────────────────────────────────────────────────────
-const HUB_EMOJI = {
-  'Get Started': '🚀',
-  'Marketing Hub': '🧲',
-  'Sales Hub': '💰',
-  'Service Hub': '🎧',
-  'AI & Breeze': '🧠',
-  'Agentic Platform': '🤖',
-};
+const HUB_EMOJI = { 'Get Started':'🚀', 'Marketing Hub':'🧲', 'Sales Hub':'💰', 'Service Hub':'🎧', 'AI & Breeze':'🧠', 'Agentic Platform':'🤖' };
 
-// ── ADVENTURES DATA ─────────────────────────────────────────────────────────
 const ADVENTURES = [
   { id:1,  hub:"Get Started",      route:"Get started with HubSpot", adv:"Portal welcome and navigation",           desc:"Tour the dashboard — where each section lives and which tools are in your plan.", vid1:"https://app.hubspot.com/academy/53/shortvideo/1892747?language=EN&ruid=25879245", vid2:"", dur:"3 min", task:"Explore the 3 main sections: CRM, Marketing and Reports. Note which tools are active." },
   { id:2,  hub:"Get Started",      route:"Get started with HubSpot", adv:"Company, users and permissions",          desc:"Configure company details, invite your team, and assign the correct roles.", vid1:"https://app.hubspot.com/academy/53/shortvideo/7072817?language=EN&ruid=25879245", vid2:"https://app.hubspot.com/academy/53/shortvideo/2990176?language=EN&ruid=25879245", dur:"3 min", task:"Update company details, invite at least one team member, and assign the correct role." },
