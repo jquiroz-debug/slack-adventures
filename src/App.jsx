@@ -607,32 +607,78 @@ function AdventureCard({ adv, idx, completed, onComplete }) {
             </div>
           </div>
 
-          {/* evidence */}
+          {/* evidence — file/image upload */}
           {!done && (
             <>
-              <div style={{ fontFamily: "'Press Start 2P'", fontSize: 6, color: C.muted, marginBottom: 6, letterSpacing: 1 }}>
+              <div style={{ fontFamily: "'Press Start 2P'", fontSize: 6, color: C.muted, marginBottom: 8, letterSpacing: 1 }}>
                 📎 SUBMIT EVIDENCE
               </div>
-              <textarea
-                value={ev}
-                onChange={e => setEv(e.target.value)}
-                placeholder="URL, screenshot description, or a note..."
-                style={{
-                  width: "100%", background: C.bg2,
-                  border: `2px solid ${ev.trim() ? hub.color : C.border}`,
-                  padding: "10px 12px",
-                  fontFamily: "'Press Start 2P'", fontSize: 7,
-                  color: C.text, resize: "vertical", minHeight: 64,
-                  outline: "none", lineHeight: 2,
-                  boxSizing: "border-box",
-                }}
-              />
+
+              {/* upload zone */}
+              <label style={{
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                gap: 10, padding: "20px 14px",
+                background: ev ? `${hub.color}08` : C.bg2,
+                border: `2px dashed ${ev ? hub.color : C.border}`,
+                cursor: "pointer", transition: "all 0.2s",
+                boxSizing: "border-box", width: "100%",
+              }}>
+                <input
+                  type="file"
+                  accept="image/*,.pdf,.png,.jpg,.jpeg,.gif,.webp"
+                  style={{ display: "none" }}
+                  onChange={e => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = evt => setEv({ name: file.name, type: file.type, preview: evt.target.result });
+                    reader.readAsDataURL(file);
+                  }}
+                />
+                {!ev ? (
+                  <>
+                    <div style={{ fontSize: 28 }}>📁</div>
+                    <div style={{ fontFamily: "'Press Start 2P'", fontSize: 7, color: C.muted, textAlign: "center", lineHeight: 2 }}>
+                      CLICK TO UPLOAD<br />
+                      <span style={{ fontSize: 6, color: C.muted }}>screenshot, image or PDF</span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ width: "100%", textAlign: "center" }}>
+                    {ev.type?.startsWith("image/") ? (
+                      <img
+                        src={ev.preview}
+                        alt="evidence preview"
+                        style={{
+                          maxWidth: "100%", maxHeight: 200,
+                          border: `2px solid ${hub.color}`,
+                          boxShadow: `0 0 12px ${hub.color}40`,
+                          marginBottom: 8,
+                        }}
+                      />
+                    ) : (
+                      <div style={{
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                        padding: "12px", background: C.bg3,
+                        border: `2px solid ${hub.color}`, marginBottom: 8,
+                      }}>
+                        <span style={{ fontSize: 20 }}>📄</span>
+                        <span style={{ fontFamily: "'Press Start 2P'", fontSize: 7, color: hub.color }}>{ev.name}</span>
+                      </div>
+                    )}
+                    <div style={{ fontFamily: "'Press Start 2P'", fontSize: 6, color: C.muted }}>
+                      ✓ {ev.name} — <span style={{ color: hub.color, cursor: "pointer" }} onClick={e => { e.preventDefault(); setEv(null); }}>CHANGE FILE</span>
+                    </div>
+                  </div>
+                )}
+              </label>
+
               <div style={{ marginTop: 10 }}>
                 <PixelButton
                   label="✓ MISSION COMPLETE"
-                  color={ev.trim() ? C.green : C.muted}
-                  disabled={!ev.trim()}
-                  onClick={() => { onComplete(adv.id, ev); setOpen(false); }}
+                  color={ev ? C.green : C.muted}
+                  disabled={!ev}
+                  onClick={() => { onComplete(adv.id, ev.name); setOpen(false); }}
                   size="md"
                 />
               </div>
